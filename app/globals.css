@@ -1,0 +1,17 @@
+@import 'tailwindcss';
+
+@theme inline { --color-background: var(--background); --color-foreground: var(--foreground); --color-card: var(--card); --color-card-foreground: var(--card-foreground); --color-popover: var(--popover); --color-popover-foreground: var(--popover-foreground); --color-primary: var(--primary); --color-primary-foreground: var(--primary-foreground); --color-muted: var(--muted); --color-muted-foreground: var(--muted-foreground); --color-accent: var(--accent); --color-border: var(--border); --color-input: var(--input); --color-ring: var(--ring); }
+:root { --background: #fbfbfc; --foreground: #14151a; --card: #ffffff; --card-foreground: #14151a; --popover: #ffffff; --popover-foreground: #14151a; --primary: #1b1b6b; --primary-foreground: #ffffff; --muted: #f4f4f6; --muted-foreground: #71717a; --accent: #eef0ff; --border: #e4e4e7; --input: #e4e4e7; --ring: #2563eb; }
+.dark { --background: #10111b; --foreground: #f4f4f5; --card: #171827; --card-foreground: #f4f4f5; --popover: #171827; --popover-foreground: #f4f4f5; --primary: #3b82f6; --primary-foreground: #ffffff; --muted: #202132; --muted-foreground: #a1a1aa; --accent: #24264a; --border: #2f3145; --input: #2f3145; --ring: #60a5fa; }
+* { box-sizing: border-box; }
+html { background: var(--background); transition: background-color 200ms ease, color 200ms ease; }
+body { margin: 0; background: var(--background); color: var(--foreground); font-family: Arial, Helvetica, sans-serif; transition: background-color 200ms ease, color 200ms ease; }
+button, a { -webkit-tap-highlight-color: transparent; }
+button { cursor: pointer; }
+::selection { background: #dcdcff; color: #20206f; }
+.dark .bg-white, .dark .bg-white\/95 { background-color: var(--card) !important; }
+.dark .bg-\[\#fbfbfc\] { background-color: var(--background) !important; }
+.dark .text-black, .dark .text-\[\#14151a\], .dark .text-\[\#17171b\] { color: var(--foreground) !important; }
+.dark .border-\[\#e8e8eb\], .dark .border-\[\#eeeeef\], .dark .border-\[\#dedee3\] { border-color: var(--border) !important; }
+.dark .bg-\[\#f7f7f8\], .dark .bg-\[\#f4f4f6\], .dark .bg-\[\#f0f0f3\] { background-color: var(--muted) !important; }
+.dark .text-\[\#73737c\], .dark .text-\[\#777780\], .dark .text-\[\#90909a\] { color: var(--muted-foreground) !important; }

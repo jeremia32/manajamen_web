@@ -1,0 +1,13 @@
+import { encryptCredentials, maskSecret } from '@/lib/crypto'
+import { MOCK_SOURCES, type KnowledgeSource, type SourceCreateInput, type SourceStoreRecord, type SourceTestResult, MOCK_DOCUMENTS, MOCK_SYNC_RUNS } from '@/lib/types'
+
+const globalStore = globalThis as typeof globalThis & { __hutabyteSources?: SourceStoreRecord[] }
+function store() { if (!globalStore.__hutabyteSources) globalStore.__hutabyteSources = MOCK_SOURCES.map(source => ({ ...source, encryptedCredentials: encryptCredentials({ apiKey: 'sk-demo-3f2a' }), syncFrequency: 'daily', syncOnSave: true })); return globalStore.__hutabyteSources }
+export function listSources(): KnowledgeSource[] { return store().map(({ encryptedCredentials, ...source }) => ({ ...source, maskedCredential: source.maskedCredential || maskSecret('sk-demo-3f2a') })) }
+export function createSource(input: SourceCreateInput) { const source: SourceStoreRecord = { id: `${input.type}-${Date.now()}`, name: input.name, type: input.type, status: 'not_synced', documentCount: 0, lastSync: null, encryptedCredentials: encryptCredentials(input.credentials), syncFrequency: input.syncFrequency, syncOnSave: input.syncOnSave, maskedCredential: maskSecret(input.credentials.apiKey || input.credentials.token) }; store().push(source); return listSources().find(item => item.id === source.id)! }
+export function updateSource(id: string, input: Partial<SourceCreateInput>) { const item = store().find(source => source.id === id); if (!item) return null; Object.assign(item, input.name ? { name: input.name } : {}, input.syncFrequency ? { syncFrequency: input.syncFrequency } : {}, typeof input.syncOnSave === 'boolean' ? { syncOnSave: input.syncOnSave } : {}, input.credentials && Object.keys(input.credentials).length ? { encryptedCredentials: encryptCredentials(input.credentials) } : {}); return listSources().find(source => source.id === id) }
+export function deleteSource(id: string) { const index = store().findIndex(source => source.id === id); if (index < 0) return false; store().splice(index, 1); return true }
+export function testSource(input: SourceCreateInput): SourceTestResult { if (!input.name || !input.type) return { success: false, message: 'Nama sumber dan jenis koneksi wajib diisi.' }; if (input.type === 'outline') return { success: true, message: 'Koneksi berhasil, ditemukan 128 dokumen.', documentCount: 128 }; return { success: true, message: 'Koneksi berhasil. Sumber siap disinkronkan.', documentCount: 42 } }
+export function getDocuments() { return MOCK_DOCUMENTS }
+export function getSyncRuns() { return MOCK_SYNC_RUNS }
+export function getSource(id: string) { return listSources().find(source => source.id === id) }

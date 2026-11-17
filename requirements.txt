@@ -1,0 +1,16 @@
+fastapi>=0.115,<1
+uvicorn[standard]>=0.34,<1
+langgraph>=0.3,<2
+langchain-openai>=0.3,<2
+langchain-text-splitters>=0.3,<2
+huggingface_hub>=0.32,<2
+supabase>=2.15,<3
+requests>=2.32,<3
+cryptography>=44,<47
+msal>=1.31,<2
+pypdf>=5,<7
+pdfplumber>=0.11,<1
+python-docx>=1.1,<2
+python-multipart>=0.0.20,<1
+python-dotenv>=1,<2
+tzdata>=2025.1,<2027
