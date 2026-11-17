@@ -36,6 +36,29 @@ export async function authenticatedFetch(input: RequestInfo | URL, init: Request
 	return fetch(input, { ...init, headers })
 }
 
+export async function readApiResponse<T>(response: Response, fallback: string): Promise<T> {
+	const text = await response.text()
+	let result: unknown
+	try {
+		result = text ? JSON.parse(text) : null
+	} catch {
+		if (!response.ok) {
+			throw new Error(text.trim() || `${fallback} (HTTP ${response.status}).`)
+		}
+		throw new Error('Respons server tidak valid.')
+	}
+
+	if (!response.ok) {
+		const payload = typeof result === 'object' && result !== null
+			? result as { detail?: unknown; error?: unknown; message?: unknown }
+			: null
+		const message = [payload?.detail, payload?.error, payload?.message]
+			.find((value): value is string => typeof value === 'string' && Boolean(value.trim()))
+		throw new Error(message || `${fallback} (HTTP ${response.status}).`)
+	}
+	return result as T
+}
+
 export function useSupabaseAuth(): { user: User | null; loading: boolean; error: string | null } {
 	const [user, setUser] = useState<User | null>(null)
 	const [loading, setLoading] = useState(true)

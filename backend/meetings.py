@@ -11,8 +11,10 @@ from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import requests
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from postgrest.exceptions import APIError
 from pydantic import BaseModel, Field
+from storage3.exceptions import StorageApiError
 
 from backend.auth import get_supabase, require_authenticated_user
 from backend.connectors import ConnectorError, decrypt_credentials, encrypt_credentials
@@ -22,11 +24,38 @@ logger = logging.getLogger(__name__)
 GOOGLE_CALENDAR_API = "https://www.googleapis.com/calendar/v3"
 GOOGLE_CONNECTION_TABLE = "meeting_google_connection"
 GOOGLE_STATES_TABLE = "meeting_google_oauth_states"
+PROFILE_PHOTO_BUCKET = "profile-photos"
+MAX_PROFILE_PHOTO_BYTES = 5 * 1024 * 1024
+
+
+def _ensure_profile_photo_bucket(supabase: Any) -> None:
+    try:
+        supabase.storage.create_bucket(
+            PROFILE_PHOTO_BUCKET,
+            name=PROFILE_PHOTO_BUCKET,
+            options={
+                "public": True,
+                "file_size_limit": MAX_PROFILE_PHOTO_BYTES,
+                "allowed_mime_types": ["image/jpeg", "image/png", "image/webp"],
+            },
+        )
+    except StorageApiError as error:
+        duplicate = (
+            str(error.status) == "409"
+            or error.code in {"Duplicate", "BucketAlreadyExists"}
+            or "already exists" in error.message.casefold()
+        )
+        if duplicate:
+            return
+        logger.exception("Supabase gagal membuat bucket foto profil")
+        raise HTTPException(
+            status_code=502,
+            detail=f"Bucket foto profil tidak dapat disiapkan di Supabase: {error.message}",
+        ) from error
 
 
 class ProfileUpdate(BaseModel):
     full_name: str | None = Field(default=None, max_length=120)
-    profile_photo_url: str | None = Field(default=None, max_length=2048)
     position: str | None = Field(default=None, max_length=120)
     department: str | None = Field(default=None, max_length=120)
 
@@ -62,16 +91,18 @@ def _user_id(user: dict[str, Any]) -> UUID:
         raise HTTPException(status_code=401, detail="Identitas login tidak valid.") from error
 
 
+def _maybe_single_data(query: Any) -> Any:
+    response = query.maybe_single().execute()
+    return response.data if response is not None else None
+
+
 def _profile_for_user(user: dict[str, Any]) -> dict[str, Any]:
     user_id = _user_id(user)
     supabase = get_supabase()
-    profile = (
+    profile = _maybe_single_data(
         supabase.table("profiles")
         .select("user_id, email, full_name, profile_photo_url, position, department, account_status, last_seen_at")
         .eq("user_id", str(user_id))
-        .maybe_single()
-        .execute()
-        .data
     )
     email = str(user.get("email") or "")
     if not profile:
@@ -135,14 +166,6 @@ def _profile_payload(profile: dict[str, Any]) -> dict[str, Any]:
     return {**profile, "online_status": "online" if online else "offline"}
 
 
-def _validate_profile_photo(url: str | None) -> str | None:
-    if not url:
-        return None
-    if not url.startswith(("https://", "http://")):
-        raise HTTPException(status_code=422, detail="Foto profil harus menggunakan URL HTTP atau HTTPS.")
-    return url
-
-
 @router.get("/profiles/me")
 def get_my_profile(user: dict[str, Any] = Depends(require_authenticated_user)) -> dict[str, Any]:
     return _profile_payload(_profile_for_user(user))
@@ -163,8 +186,6 @@ def update_my_profile(
         updates["position"] = (updates["position"] or "").strip()
     if "department" in updates:
         updates["department"] = (updates["department"] or "").strip()
-    if "profile_photo_url" in updates:
-        updates["profile_photo_url"] = _validate_profile_photo(updates["profile_photo_url"])
     if updates:
         result = (
             get_supabase()
@@ -179,6 +200,107 @@ def update_my_profile(
             raise HTTPException(status_code=502, detail="Profil tidak dapat disimpan.")
         profile = result[0]
     return _profile_payload(profile)
+
+
+@router.post("/profiles/me/photo")
+async def upload_profile_photo(
+    file: UploadFile = File(...),
+    user: dict[str, Any] = Depends(require_authenticated_user),
+) -> dict[str, Any]:
+    profile = _profile_for_user(user)
+    content = await file.read(MAX_PROFILE_PHOTO_BYTES + 1)
+    await file.close()
+    if len(content) > MAX_PROFILE_PHOTO_BYTES:
+        raise HTTPException(status_code=413, detail="Ukuran foto profil maksimum adalah 5 MB.")
+
+    content_type = (file.content_type or "").lower()
+    extensions = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}
+    valid_signature = (
+        content_type == "image/jpeg" and content.startswith(b"\xff\xd8\xff")
+        or content_type == "image/png" and content.startswith(b"\x89PNG\r\n\x1a\n")
+        or content_type == "image/webp" and content[:4] == b"RIFF" and content[8:12] == b"WEBP"
+    )
+    if content_type not in extensions or not valid_signature:
+        raise HTTPException(status_code=415, detail="Gunakan foto JPG, PNG, atau WebP yang valid.")
+
+    supabase = get_supabase()
+    storage = supabase.storage.from_(PROFILE_PHOTO_BUCKET)
+    storage_path = f"{profile['user_id']}/{uuid4().hex}.{extensions[content_type]}"
+    try:
+        storage.upload(
+            storage_path,
+            content,
+            file_options={
+                "content-type": content_type,
+                "cache-control": "0",
+                "upsert": "true",
+            },
+        )
+    except StorageApiError as error:
+        bucket_missing = (
+            str(error.status) == "404"
+            or error.code in {"BucketNotFound", "NotFound"}
+            or "bucket not found" in error.message.casefold()
+        )
+        if not bucket_missing:
+            logger.exception("Supabase Storage gagal menyimpan foto profil untuk user %s", profile["user_id"])
+            raise HTTPException(
+                status_code=502,
+                detail=f"Foto profil gagal disimpan ke Supabase Storage: {error.message}",
+            ) from error
+
+        logger.info("Bucket foto profil belum ada; mencoba membuatnya sebelum upload")
+        _ensure_profile_photo_bucket(supabase)
+        try:
+            storage.upload(
+                storage_path,
+                content,
+                file_options={
+                    "content-type": content_type,
+                    "cache-control": "0",
+                    "upsert": "true",
+                },
+            )
+        except StorageApiError as retry_error:
+            logger.exception("Upload foto profil gagal setelah bucket disiapkan untuk user %s", profile["user_id"])
+            raise HTTPException(
+                status_code=502,
+                detail=f"Foto profil gagal disimpan ke Supabase Storage: {retry_error.message}",
+            ) from retry_error
+
+    photo_url = storage.get_public_url(storage_path)
+    try:
+        result = (
+            supabase.table("profiles")
+            .update({"profile_photo_url": photo_url, "updated_at": datetime.now(timezone.utc).isoformat()})
+            .eq("user_id", str(profile["user_id"]))
+            .select("user_id, email, full_name, profile_photo_url, position, department, account_status, last_seen_at")
+            .execute()
+            .data
+        )
+    except APIError as error:
+        try:
+            storage.remove([storage_path])
+        except StorageApiError:
+            logger.exception("Gagal membersihkan foto profil setelah update database gagal untuk user %s", profile["user_id"])
+        logger.exception("Gagal menyimpan URL foto profil untuk user %s", profile["user_id"])
+        raise HTTPException(status_code=502, detail="Foto tersimpan, tetapi profil gagal diperbarui.") from error
+    if not result:
+        try:
+            storage.remove([storage_path])
+        except StorageApiError:
+            logger.exception("Gagal membersihkan foto profil setelah profil tidak ditemukan untuk user %s", profile["user_id"])
+        raise HTTPException(status_code=502, detail="Profil tidak dapat diperbarui setelah mengunggah foto.")
+    old_photo_url = str(profile.get("profile_photo_url") or "").split("?", 1)[0]
+    own_photo_prefix = storage.get_public_url(f"{profile['user_id']}/")
+    if old_photo_url.startswith(own_photo_prefix):
+        old_storage_path = f"{profile['user_id']}/{old_photo_url[len(own_photo_prefix):]}"
+        if old_storage_path != storage_path:
+            try:
+                storage.remove([old_storage_path])
+            except StorageApiError:
+                logger.exception("Gagal membersihkan foto profil lama untuk user %s", profile["user_id"])
+    return _profile_payload(result[0])
 
 
 @router.post("/profiles/presence")
@@ -249,14 +371,11 @@ def _google_api_error(response: requests.Response) -> str:
 
 
 def _shared_calendar_connection() -> dict[str, Any]:
-    connection = (
+    connection = _maybe_single_data(
         get_supabase()
         .table(GOOGLE_CONNECTION_TABLE)
         .select("*")
         .eq("singleton", True)
-        .maybe_single()
-        .execute()
-        .data
     )
     if not connection:
         raise HTTPException(status_code=503, detail="Kalender Google workspace belum dihubungkan oleh admin.")
@@ -544,14 +663,11 @@ def _meeting_payloads(meetings: list[dict[str, Any]], *, include_participants: b
 
 
 def _get_meeting(meeting_id: UUID) -> dict[str, Any]:
-    meeting = (
+    meeting = _maybe_single_data(
         get_supabase()
         .table("meetings")
         .select("*")
         .eq("id", str(meeting_id))
-        .maybe_single()
-        .execute()
-        .data
     )
     if not meeting:
         raise HTTPException(status_code=404, detail="Meeting tidak ditemukan.")
@@ -562,15 +678,12 @@ def _authorize_meeting(meeting: dict[str, Any], user: dict[str, Any]) -> None:
     user_id = str(_user_id(user))
     if str(meeting["organizer_id"]) == user_id or _is_meeting_admin(user):
         return
-    participant = (
+    participant = _maybe_single_data(
         get_supabase()
         .table("meeting_participants")
         .select("user_id")
         .eq("meeting_id", str(meeting["id"]))
         .eq("user_id", user_id)
-        .maybe_single()
-        .execute()
-        .data
     )
     if not participant:
         raise HTTPException(status_code=404, detail="Meeting tidak ditemukan.")
@@ -623,16 +736,25 @@ def _database_meeting_update_payload(payload: MeetingInput, event_id: str, meet_
 
 @router.get("/meetings/calendar/connection")
 def calendar_connection_status(user: dict[str, Any] = Depends(require_authenticated_user)) -> dict[str, Any]:
-    _profile_for_user(user)
-    connection = (
-        get_supabase()
-        .table(GOOGLE_CONNECTION_TABLE)
-        .select("email, display_name, connected_by, updated_at")
-        .eq("singleton", True)
-        .maybe_single()
-        .execute()
-        .data
-    )
+    try:
+        _profile_for_user(user)
+        connection = _maybe_single_data(
+            get_supabase()
+            .table(GOOGLE_CONNECTION_TABLE)
+            .select("email, display_name, connected_by, updated_at")
+            .eq("singleton", True)
+        )
+    except APIError as error:
+        logger.exception("Could not read the shared Google Calendar connection from Supabase")
+        if error.code in {"42P01", "42703", "PGRST204", "PGRST205"}:
+            raise HTTPException(
+                status_code=503,
+                detail="Skema profil atau koneksi Google Calendar belum tersedia atau belum sinkron. Jalankan migrasi terbaru dari supabase/schema.sql.",
+            ) from error
+        raise HTTPException(
+            status_code=503,
+            detail="Status koneksi Google Calendar tidak dapat dibaca dari Supabase. Periksa log backend.",
+        ) from error
     return {
         "connected": bool(connection),
         "can_manage": _is_meeting_admin(user),
@@ -670,13 +792,10 @@ def start_calendar_oauth(user: dict[str, Any] = Depends(require_authenticated_us
 @router.post("/meetings/calendar/auth/callback")
 def complete_calendar_oauth(payload: GoogleOAuthCallback) -> dict[str, Any]:
     supabase = get_supabase()
-    state_row = (
+    state_row = _maybe_single_data(
         supabase.table(GOOGLE_STATES_TABLE)
         .select("user_id, expires_at")
         .eq("state", payload.state)
-        .maybe_single()
-        .execute()
-        .data
     )
     if not state_row or datetime.fromisoformat(str(state_row["expires_at"]).replace("Z", "+00:00")) < datetime.now(timezone.utc):
         raise HTTPException(status_code=400, detail="State Google OAuth tidak ditemukan atau kedaluwarsa. Coba hubungkan ulang.")

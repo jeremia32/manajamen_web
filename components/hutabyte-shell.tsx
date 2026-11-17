@@ -8,12 +8,17 @@ import { useEffect, useState } from 'react'
 import { useTheme } from 'next-themes'
 import { GlobalSearch } from '@/components/global-search'
 import { NotificationBell } from '@/components/notification-bell'
-import { authenticatedFetch, getSupabaseBrowserClient, useSupabaseAuth } from '@/lib/supabase-browser'
+import { authenticatedFetch, getSupabaseBrowserClient, readApiResponse, useSupabaseAuth } from '@/lib/supabase-browser'
 
 const navItems = [
   { href: '/', label: 'Dasbor', icon: LayoutDashboard }, { href: '/meetings', label: 'Meeting', icon: CalendarDays }, { href: '/assistant', label: 'Asisten AI', icon: Bot }, { href: '/analyzer', label: 'Analisis Dokumen', icon: FileSearch }, { href: '/pdf-extractor', label: 'Ekstraksi PDF', icon: FileSearch }, { href: '/knowledge', label: 'Basis Pengetahuan', icon: BookOpen }, { href: '/teams', label: 'Microsoft Teams', icon: UsersRound }, { href: '/knowledge', label: 'Dokumen Terbaru', icon: FolderOpen }, { href: '/profile', label: 'Profil', icon: UserRound },
 ]
 const themes = [{ value: 'light', label: 'Terang', icon: Sun }, { value: 'dark', label: 'Gelap', icon: Moon }, { value: 'system', label: 'Sistem', icon: Monitor }]
+
+type ProfilePreview = {
+  full_name: string
+  profile_photo_url: string | null
+}
 
 export function ThemeSwitcher() { const { theme, setTheme } = useTheme(); const [mounted, setMounted] = useState(false); useEffect(() => setMounted(true), []); const current = themes.findIndex((item) => item.value === theme); const cycle = () => setTheme(themes[(current + 1) % themes.length].value); if (!mounted) return <div className="h-8" />; return <div className="flex items-center gap-0.5 rounded-lg border border-border bg-muted p-0.5">{themes.map(({ value, label, icon: Icon }) => <button key={value} onClick={() => setTheme(value)} aria-label={label} className={`flex items-center gap-1 rounded-md px-2 py-1.5 text-[10px] transition-colors ${theme === value ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}><Icon className="size-3" /><span className="hidden xl:inline">{label}</span></button>)}</div> }
 
@@ -23,6 +28,7 @@ export function HutabyteShell({ children }: { children: React.ReactNode }) {
   const { user, loading: authLoading } = useSupabaseAuth()
   const [mobileOpen, setMobileOpen] = useState(false)
   const [authActionError, setAuthActionError] = useState('')
+  const [profilePreview, setProfilePreview] = useState<ProfilePreview | null>(null)
   const protectedRoute = ['/assistant', '/analyzer', '/pdf-extractor', '/knowledge', '/teams', '/search', '/meetings', '/profile'].some(
     prefix => pathname === prefix || pathname.startsWith(`${prefix}/`),
   )
@@ -32,6 +38,32 @@ export function HutabyteShell({ children }: { children: React.ReactNode }) {
     const next = `${window.location.pathname}${window.location.search}`
     router.replace(`/login?next=${encodeURIComponent(next)}`)
   }, [authLoading, pathname, protectedRoute, router, user])
+
+  useEffect(() => {
+    if (authLoading) return
+    if (!user) {
+      setProfilePreview(null)
+      return
+    }
+
+    let active = true
+    const loadProfilePreview = async () => {
+      try {
+        const response = await authenticatedFetch('/api/profile', { cache: 'no-store' })
+        const profile = await readApiResponse<ProfilePreview>(response, 'Info profil navbar tidak dapat dimuat.')
+        if (active) setProfilePreview(profile)
+      } catch (cause) {
+        if (active) console.error('Navbar profile could not be loaded:', cause)
+      }
+    }
+    const refreshProfilePreview = () => { void loadProfilePreview() }
+    void loadProfilePreview()
+    window.addEventListener('profile-updated', refreshProfilePreview)
+    return () => {
+      active = false
+      window.removeEventListener('profile-updated', refreshProfilePreview)
+    }
+  }, [authLoading, user?.id])
 
   useEffect(() => {
     if (!user || authLoading) return
@@ -84,6 +116,12 @@ export function HutabyteShell({ children }: { children: React.ReactNode }) {
     }
   }
 
+  const metadataName = user?.user_metadata?.full_name || user?.user_metadata?.name
+  const metadataPhoto = user?.user_metadata?.avatar_url || user?.user_metadata?.picture
+  const displayName = profilePreview?.full_name || (typeof metadataName === 'string' ? metadataName : '') || user?.email || 'Profil'
+  const profilePhotoUrl = profilePreview?.profile_photo_url || (typeof metadataPhoto === 'string' ? metadataPhoto : '')
+  const profileInitial = displayName.slice(0, 1).toUpperCase()
+
   return (
     <div className="min-h-screen bg-background text-foreground transition-colors duration-200">
       <header className="fixed inset-x-0 top-0 z-30 flex h-[58px] items-center border-b border-border bg-background/95 px-4 backdrop-blur lg:px-6">
@@ -97,18 +135,35 @@ export function HutabyteShell({ children }: { children: React.ReactNode }) {
         <div className="absolute left-1/2 -translate-x-1/2">{user && <GlobalSearch />}</div>
         <div className="relative ml-auto flex items-center gap-2">
           {authLoading ? <span className="size-8" aria-label="Memeriksa sesi" /> : user ? (
-            <div className="flex items-center gap-2">
-              <span className="hidden max-w-36 truncate text-xs text-muted-foreground sm:inline">{user.email}</span>
-              <button type="button" onClick={() => void signOut()} className="flex items-center gap-1.5 rounded-lg border px-2.5 py-2 text-xs font-medium hover:bg-muted" aria-label="Keluar">
-                <LogOut className="size-3.5" /><span className="hidden sm:inline">Keluar</span>
-              </button>
-            </div>
+            <NotificationBell enabled />
           ) : (
-            <Link href="/login" className="flex items-center gap-1.5 rounded-lg border px-2.5 py-2 text-xs font-medium hover:bg-muted">
-              <LogIn className="size-3.5" />Masuk
-            </Link>
+            <NotificationBell enabled={false} />
           )}
-          <NotificationBell enabled={Boolean(user)} />
+          {authLoading ? null : user ? (
+            <>
+              <Link
+                href="/profile"
+                aria-label={`Buka profil ${displayName}`}
+                title="Buka profil"
+                className="group flex min-w-0 items-center gap-2 rounded-full border border-border/80 bg-card/80 py-1 pl-1 pr-3 shadow-sm transition hover:border-primary/40 hover:bg-muted/70 hover:shadow"
+              >
+                {profilePhotoUrl ? (
+                  <img src={profilePhotoUrl} alt="" className="size-8 shrink-0 rounded-full object-cover ring-2 ring-background" />
+                ) : (
+                  <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-primary/10 text-xs font-semibold text-primary ring-2 ring-background">{profileInitial}</span>
+                )}
+                <span className="hidden min-w-0 text-left sm:block">
+                  <span className="block max-w-32 truncate text-[11px] font-semibold leading-4">{displayName}</span>
+                  <span className="block max-w-32 truncate text-[10px] leading-3 text-muted-foreground">{user.email}</span>
+                </span>
+              </Link>
+              <button type="button" onClick={() => void signOut()} className="flex size-9 shrink-0 items-center justify-center rounded-full border border-border/80 bg-card/80 text-muted-foreground shadow-sm transition hover:bg-muted hover:text-foreground" aria-label="Keluar" title="Keluar">
+                <LogOut className="size-4" />
+              </button>
+            </>
+          ) : (
+            <Link href="/login" className="flex items-center gap-1.5 rounded-lg border px-2.5 py-2 text-xs font-medium hover:bg-muted"><LogIn className="size-3.5" />Masuk</Link>
+          )}
           {authActionError && <p role="alert" className="absolute right-0 top-[calc(100%+10px)] z-50 w-64 rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-800">{authActionError}</p>}
         </div>
       </header>

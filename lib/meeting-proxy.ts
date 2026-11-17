@@ -25,10 +25,18 @@ export async function forwardMeetingRequest(request: Request, backendPath: strin
       body,
       cache: 'no-store',
     })
+    const contentType = response.headers.get('Content-Type') || ''
+    if (!contentType.toLowerCase().includes('json')) {
+      const message = (await response.text()).trim().slice(0, 500)
+      return NextResponse.json(
+        { error: message || `Backend mengembalikan respons tidak valid (HTTP ${response.status}).` },
+        { status: response.ok ? 502 : response.status },
+      )
+    }
     return new Response(response.body, {
       status: response.status,
       headers: {
-        'Content-Type': response.headers.get('Content-Type') || 'application/json',
+        'Content-Type': contentType,
       },
     })
   } catch {

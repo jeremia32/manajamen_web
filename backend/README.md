@@ -66,6 +66,12 @@ Set `GOOGLE_MEET_CLIENT_ID`, `GOOGLE_MEET_CLIENT_SECRET`, and `GOOGLE_MEET_REDIR
 
 Calendar events are created on the connected shared account with Google Meet conference data. Google Calendar sends guest invitations and calendar email reminders; the backend also creates in-app reminders at four days, one day, 30 minutes, and meeting start. The FastAPI reminder worker processes due reminders using the database transaction function, so duplicate worker runs do not duplicate notifications. `MEETING_REMINDER_POLL_SECONDS` controls the polling interval.
 
+The same schema migration creates the public `profile-photos` Supabase Storage bucket. Users can upload JPG, PNG, or WebP profile photos up to 5 MB from the Profile page; uploads are validated and written by the authenticated backend, then the resulting public URL is saved to `profiles.profile_photo_url`. Reapply the latest `supabase/schema.sql` if the bucket does not exist.
+
+### Global search
+
+The navbar search and Search page return matching workspace pages, documents, and meetings. Document results combine title/source matching with semantic document search. Meeting results are limited to meetings organized by or inviting the signed-in user. If Supabase metadata queries or semantic retrieval are unavailable, the endpoint still returns accessible results from working categories and includes warnings; check the response and backend logs for the affected category.
+
 ### Hugging Face and existing documents
 
 After applying the latest schema and setting `HF_TOKEN`, re-embed stored document chunks once. Stop the running backend first, then run this from the repository root:

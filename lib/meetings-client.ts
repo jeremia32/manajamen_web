@@ -1,4 +1,4 @@
-import { authenticatedFetch } from '@/lib/supabase-browser'
+import { authenticatedFetch, readApiResponse } from '@/lib/supabase-browser'
 
 export type WorkspaceProfile = {
   user_id: string
@@ -48,9 +48,7 @@ export type MeetingInput = {
 
 export async function meetingRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
   const response = await authenticatedFetch(path, { cache: 'no-store', ...init })
-  const result = await response.json()
-  if (!response.ok) throw new Error(result.detail || result.error || 'Permintaan meeting gagal.')
-  return result as T
+  return readApiResponse<T>(response, 'Permintaan meeting gagal.')
 }
 
 export function getJakartaDateKey(value: string | Date): string {

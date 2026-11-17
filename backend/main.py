@@ -31,6 +31,7 @@ import msal
 from openai import AuthenticationError
 from pdfminer.pdfdocument import PDFPasswordIncorrect
 from pdfminer.pdfparser import PDFException
+from postgrest.exceptions import APIError
 from pydantic import BaseModel, Field
 from pypdf import PdfReader
 import pdfplumber
@@ -1646,29 +1647,253 @@ def delete_conversation(conversation_id: str) -> dict[str, bool]:
         raise HTTPException(status_code=502, detail=f"Gagal menghapus percakapan: {error}") from error
 
 
-@app.get("/search", dependencies=[Depends(require_authenticated_user)])
-def search(q: str, language: str = "id") -> dict[str, Any]:
-    if not q.strip():
-        return {"query": q, "results": []}
-    try:
-        matches = retrieve(q, limit=8)
-    except HTTPException:
-        raise
-    except Exception as error:
-        raise HTTPException(status_code=502, detail=f"Gagal mencari dokumen: {error}") from error
-    results = [
-        {
+SEARCHABLE_PAGES = [
+    {
+        "id": "dashboard",
+        "title": "Dasbor",
+        "description": "Ringkasan aktivitas, dokumen, dan ruang kerja.",
+        "keywords": "beranda aktivitas statistik",
+        "href": "/",
+    },
+    {
+        "id": "meetings",
+        "title": "Meeting Management",
+        "description": "Kalender, jadwal, undangan, dan Google Meet.",
+        "keywords": "rapat meeting kalender jadwal",
+        "href": "/meetings",
+    },
+    {
+        "id": "create-meeting",
+        "title": "Buat meeting",
+        "description": "Jadwalkan meeting dan pilih peserta.",
+        "keywords": "rapat jadwalkan undangan peserta",
+        "href": "/meetings/new",
+    },
+    {
+        "id": "assistant",
+        "title": "Asisten AI",
+        "description": "Tanya jawab dan percakapan dengan asisten AI.",
+        "keywords": "chat tanya jawab percakapan",
+        "href": "/assistant",
+    },
+    {
+        "id": "analyzer",
+        "title": "Analisis Dokumen",
+        "description": "Ekstrak informasi dan analisis risiko dokumen.",
+        "keywords": "analisa kontrak ekstraksi risiko",
+        "href": "/analyzer",
+    },
+    {
+        "id": "pdf-extractor",
+        "title": "Ekstraksi PDF",
+        "description": "Ekstrak teks dan ringkasan dari dokumen PDF.",
+        "keywords": "pdf teks ringkasan",
+        "href": "/pdf-extractor",
+    },
+    {
+        "id": "knowledge",
+        "title": "Basis Pengetahuan",
+        "description": "Dokumen dan sumber pengetahuan workspace.",
+        "keywords": "dokumen sumber knowledge",
+        "href": "/knowledge",
+    },
+    {
+        "id": "teams",
+        "title": "Microsoft Teams",
+        "description": "Tim, channel, dan pesan Microsoft Teams.",
+        "keywords": "teams channel pesan microsoft",
+        "href": "/teams",
+    },
+    {
+        "id": "profile",
+        "title": "Profil",
+        "description": "Informasi akun, jabatan, dan departemen.",
+        "keywords": "akun user pengguna",
+        "href": "/profile",
+    },
+]
+
+
+def _search_pattern(query: str) -> str:
+    escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
+def _search_document_results(
+    supabase: Any,
+    pattern: str,
+    query: str,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    documents: dict[str, dict[str, Any]] = {}
+    warnings: list[str] = []
+    rows_by_name = (
+        supabase.table("documents")
+        .select("id, name, mime_type, source_name, source_type")
+        .ilike("name", pattern)
+        .limit(12)
+        .execute()
+        .data
+        or []
+    )
+    rows_by_source = (
+        supabase.table("documents")
+        .select("id, name, mime_type, source_name, source_type")
+        .ilike("source_name", pattern)
+        .limit(12)
+        .execute()
+        .data
+        or []
+    )
+    for row in [*rows_by_name, *rows_by_source]:
+        document_id = str(row["id"])
+        documents[document_id] = {
             "type": "document",
-            "id": item.get("document_id"),
-            "title": item.get("document_name", "Dokumen"),
-            "source": "Basis pengetahuan",
-            "snippet": item.get("content", "")[:320],
+            "id": document_id,
+            "title": row["name"],
+            "source": row.get("source_name") or row.get("source_type") or "Dokumen workspace",
+            "snippet": f"{row.get('mime_type') or 'Dokumen'} · {row.get('source_name') or 'Workspace'}",
             "href": "/knowledge",
-            "similarity": item.get("similarity"),
         }
-        for item in matches
+
+    semantic_results: list[dict[str, Any]] = []
+    try:
+        semantic_results = retrieve(query, limit=8) or []
+    except HTTPException as error:
+        logger.warning(
+            "Semantic document search unavailable (HTTP %s): %s",
+            error.status_code,
+            error.detail,
+        )
+        warnings.append(
+            "Pencarian isi dokumen tidak tersedia; hasil berdasarkan nama atau sumber tetap ditampilkan. "
+            "Periksa konfigurasi embedding dan log backend."
+        )
+    except APIError:
+        logger.exception("Semantic document search failed in Supabase")
+        warnings.append(
+            "Pencarian semantik dokumen gagal; hasil berdasarkan nama atau sumber tetap ditampilkan. "
+            "Periksa fungsi match_document_chunks di Supabase."
+        )
+    for item in semantic_results:
+        document_id = item.get("document_id")
+        if not document_id:
+            continue
+        documents.setdefault(str(document_id), {
+            "type": "document",
+            "id": str(document_id),
+            "title": item.get("document_name") or "Dokumen",
+            "source": "Basis pengetahuan",
+            "snippet": str(item.get("content") or "")[:320],
+            "href": "/knowledge",
+        })
+    return list(documents.values())[:12], warnings
+
+
+def _search_meeting_results(supabase: Any, user_id: str, pattern: str) -> list[dict[str, Any]]:
+    participations = (
+        supabase.table("meeting_participants")
+        .select("meeting_id")
+        .eq("user_id", user_id)
+        .limit(500)
+        .execute()
+        .data
+        or []
+    )
+    participant_meeting_ids = list({str(row["meeting_id"]) for row in participations})
+    fields = "id, title, description, starts_at, status"
+    meetings: dict[str, dict[str, Any]] = {}
+    for field in ("title", "description"):
+        owner_matches = (
+            supabase.table("meetings")
+            .select(fields)
+            .eq("organizer_id", user_id)
+            .ilike(field, pattern)
+            .limit(12)
+            .execute()
+            .data
+            or []
+        )
+        participant_matches = []
+        if participant_meeting_ids:
+            participant_matches = (
+                supabase.table("meetings")
+                .select(fields)
+                .in_("id", participant_meeting_ids)
+                .ilike(field, pattern)
+                .limit(12)
+                .execute()
+                .data
+                or []
+            )
+        for meeting in [*owner_matches, *participant_matches]:
+            meeting_id = str(meeting["id"])
+            starts_at = str(meeting.get("starts_at") or "").replace("T", " ")[:16]
+            description = str(meeting.get("description") or "").strip()
+            status = str(meeting.get("status") or "scheduled").replace("_", " ").capitalize()
+            snippet_parts = [part for part in (description[:220], status, starts_at) if part]
+            meetings[meeting_id] = {
+                "type": "meeting",
+                "id": meeting_id,
+                "title": meeting["title"],
+                "source": "Meeting",
+                "snippet": " · ".join(snippet_parts),
+                "href": f"/meetings/{meeting_id}",
+            }
+    return list(meetings.values())[:12]
+
+
+@app.get("/search")
+def search(
+    q: str,
+    language: str = "id",
+    user: dict[str, Any] = Depends(require_authenticated_user),
+) -> dict[str, Any]:
+    query = q.strip()[:120]
+    if not query:
+        return {"query": query, "language": language, "results": []}
+
+    normalized_query = query.casefold()
+    pages = [
+        {
+            "type": "page",
+            "id": page["id"],
+            "title": page["title"],
+            "source": "Halaman",
+            "snippet": page["description"],
+            "href": page["href"],
+        }
+        for page in SEARCHABLE_PAGES
+        if normalized_query in f"{page['title']} {page['description']} {page['keywords']}".casefold()
     ]
-    return {"query": q, "language": language, "results": results}
+
+    pattern = _search_pattern(query)
+    user_id = str(user["id"])
+    warnings: list[str] = []
+    documents: list[dict[str, Any]] = []
+    meetings: list[dict[str, Any]] = []
+    try:
+        supabase = get_supabase()
+    except HTTPException as error:
+        if error.status_code != 503:
+            raise
+        logger.warning("Workspace data search unavailable: %s", error.detail)
+        warnings.append("Dokumen dan meeting tidak dapat dicari karena Supabase belum dikonfigurasi.")
+    else:
+        try:
+            documents, document_warnings = _search_document_results(supabase, pattern, query)
+            warnings.extend(document_warnings)
+        except APIError:
+            logger.exception("Workspace document metadata search failed in Supabase")
+            warnings.append("Pencarian dokumen tidak tersedia. Periksa skema dokumen di supabase/schema.sql.")
+
+        try:
+            meetings = _search_meeting_results(supabase, user_id, pattern)
+        except APIError:
+            logger.exception("Workspace meeting search failed in Supabase")
+            warnings.append("Pencarian meeting tidak tersedia. Periksa skema meeting di supabase/schema.sql.")
+
+    results = [*pages, *documents, *meetings]
+    return {"query": q, "language": language, "results": results, "warnings": warnings}
 
 
 @app.get("/documents/{document_id}/text", dependencies=[Depends(require_authenticated_user)])
